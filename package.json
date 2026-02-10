@@ -1,0 +1,33 @@
+{
+  "name": "prquicktest",
+  "version": "1.1.0",
+  "description": "Run code blocks from GitHub PR descriptions",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "bin": {
+    "prquicktest": "bin/prquicktest.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "keywords": [
+    "github",
+    "pull-request",
+    "pr",
+    "test",
+    "cli",
+    "code-blocks",
+    "markdown"
+  ],
+  "author": "Murphy <m@mrmurphy.dev>",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mrmurphy/prquicktest.git"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
