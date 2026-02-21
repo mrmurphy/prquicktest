@@ -11,6 +11,7 @@
 import { spawn, spawnSync } from 'child_process';
 import { readFileSync } from 'fs';
 import { createInterface } from 'readline';
+import { randomBytes } from 'crypto';
 
 const colors = {
   reset: '\x1b[0m',
@@ -21,17 +22,7 @@ const colors = {
   red: '\x1b[31m',
 };
 
-const langConfig = {
-  bash: { cmd: 'bash', args: ['-c'] },
-  sh: { cmd: 'sh', args: ['-c'] },
-  shell: { cmd: 'bash', args: ['-c'] },
-  javascript: { cmd: 'node', args: ['-e'] },
-  js: { cmd: 'node', args: ['-e'] },
-  node: { cmd: 'node', args: ['-e'] },
-  python: { cmd: 'python3', args: ['-c'] },
-  py: { cmd: 'python3', args: ['-c'] },
-  python3: { cmd: 'python3', args: ['-c'] },
-};
+const shellLangs = new Set(['bash', 'sh', 'shell', 'zsh']);
 
 function isGitHubPrUrl(input) {
   return /^https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/.test(input);
@@ -179,7 +170,7 @@ function parseMarkdown(content) {
   return blocks;
 }
 
-function prompt(question) {
+function promptUser(question) {
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -193,32 +184,97 @@ function prompt(question) {
   });
 }
 
-function runCode(lang, code) {
-  return new Promise((resolve) => {
-    const config = langConfig[lang];
+/**
+ * Check if a code block contains only export statements (and comments/blank lines).
+ * Returns the list of exported variable names, or null if not export-only.
+ */
+function getExportOnlyVars(code) {
+  const lines = code.split('\n');
+  const varNames = [];
 
-    if (!config) {
-      console.log(`${colors.yellow}⚠ Skipping: ${lang}${colors.reset}`);
-      resolve({ success: true, skipped: true });
-      return;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+
+    const exportMatch = trimmed.match(/^export\s+([A-Za-z_][A-Za-z0-9_]*)=/);
+    if (exportMatch) {
+      varNames.push(exportMatch[1]);
+    } else {
+      return null;
+    }
+  }
+
+  return varNames.length > 0 ? varNames : null;
+}
+
+/**
+ * Spawn a persistent bash shell for running code blocks.
+ */
+function createShell() {
+  const shell = spawn('bash', [], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: process.env,
+  });
+
+  shell.on('error', (err) => {
+    console.error(`${colors.red}Shell error: ${err.message}${colors.reset}`);
+  });
+
+  return shell;
+}
+
+/**
+ * Run a code block in the persistent shell.
+ * Returns a promise that resolves with { success, code, skipped }.
+ */
+function runInShell(shell, code) {
+  return new Promise((resolve) => {
+    const marker = `PRQT_${randomBytes(16).toString('hex')}`;
+    const markerPrefix = `${marker}_EXIT_`;
+
+    let stdoutBuf = '';
+
+    const onStdout = (data) => {
+      stdoutBuf += data.toString();
+
+      // Process complete lines, keeping any incomplete line in the buffer
+      let newlineIdx;
+      while ((newlineIdx = stdoutBuf.indexOf('\n')) !== -1) {
+        const line = stdoutBuf.slice(0, newlineIdx);
+        stdoutBuf = stdoutBuf.slice(newlineIdx + 1);
+
+        if (line.startsWith(markerPrefix)) {
+          const exitCode = parseInt(line.slice(markerPrefix.length), 10);
+          cleanup();
+          resolve({ success: exitCode === 0, code: exitCode });
+          return;
+        }
+
+        process.stdout.write(line + '\n');
+      }
+    };
+
+    const onStderr = (data) => {
+      process.stderr.write(data);
+    };
+
+    const onClose = () => {
+      cleanup();
+      resolve({ success: false, code: 1 });
+    };
+
+    function cleanup() {
+      shell.stdout.off('data', onStdout);
+      shell.stderr.off('data', onStderr);
+      shell.off('close', onClose);
     }
 
-    const proc = spawn(config.cmd, [...config.args, code], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      shell: false,
-    });
+    shell.stdout.on('data', onStdout);
+    shell.stderr.on('data', onStderr);
+    shell.on('close', onClose);
 
-    proc.stdout.on('data', (data) => process.stdout.write(data));
-    proc.stderr.on('data', (data) => process.stderr.write(data));
-
-    proc.on('close', (exitCode) => {
-      resolve({ success: exitCode === 0, code: exitCode });
-    });
-
-    proc.on('error', (err) => {
-      console.error(`${colors.red}Error: ${err.message}${colors.reset}`);
-      resolve({ success: false, error: err });
-    });
+    // Write the code followed by the marker echo
+    shell.stdin.write(`${code}\necho "${markerPrefix}$?"\n`);
   });
 }
 
@@ -270,9 +326,15 @@ async function run(content, skipConfirm = false) {
   console.log(`${colors.cyan}Found ${codeBlocks.length} code block(s) in Testing section.${colors.reset}\n`);
   console.log(`${colors.cyan}─────────────────────────────────${colors.reset}\n`);
 
+  const shell = createShell();
+
   let codeBlockIndex = 0;
   let lastCodeBlockRan = false;
   const conditionResults = [];
+
+  function closeShell() {
+    shell.stdin.end();
+  }
 
   for (const block of blocks) {
     if (block.type === 'text') {
@@ -291,7 +353,7 @@ async function run(content, skipConfirm = false) {
         continue;
       }
 
-      const answer = await prompt(`${colors.yellow}Was this condition met? [y/N] ${colors.reset}`);
+      const answer = await promptUser(`${colors.yellow}Was this condition met? [y/N] ${colors.reset}`);
       const passed = answer === 'y' || answer === 'yes';
 
       if (passed) {
@@ -305,6 +367,22 @@ async function run(content, skipConfirm = false) {
       codeBlockIndex++;
       lastCodeBlockRan = false;
 
+      // Check if this is a supported shell language
+      if (!shellLangs.has(block.lang) && block.lang !== '') {
+        console.log(`${colors.yellow}⚠ Skipping unsupported language: ${block.lang}${colors.reset}\n`);
+        continue;
+      }
+
+      // Check if this is an export-only block
+      const exportVars = getExportOnlyVars(block.content);
+      if (exportVars) {
+        // Run silently without prompting
+        await runInShell(shell, block.content);
+        lastCodeBlockRan = true;
+        console.log(`${colors.dim}  ↳ Set ${exportVars.join(', ')}${colors.reset}\n`);
+        continue;
+      }
+
       // Show the code block
       console.log(`${colors.cyan}┌─ [${codeBlockIndex}/${codeBlocks.length}] ${block.lang || 'code'} ─────────────────────${colors.reset}`);
       console.log(`${colors.dim}${block.content}${colors.reset}`);
@@ -312,10 +390,11 @@ async function run(content, skipConfirm = false) {
 
       // Prompt to run this block
       if (!skipConfirm) {
-        const answer = await prompt(`${colors.yellow}Run this block? [y/N/q] ${colors.reset}`);
+        const answer = await promptUser(`${colors.yellow}Run this block? [y/N/q] ${colors.reset}`);
 
         if (answer === 'q' || answer === 'quit') {
           console.log('Aborted.');
+          closeShell();
           printConditionSummary(conditionResults);
           return;
         }
@@ -328,20 +407,19 @@ async function run(content, skipConfirm = false) {
 
       // Execute the block
       console.log(`${colors.cyan}├─ output ─────────────────────${colors.reset}`);
-      const result = await runCode(block.lang, block.content);
+      const result = await runInShell(shell, block.content);
       lastCodeBlockRan = true;
 
-      if (!result.skipped) {
-        if (result.success) {
-          console.log(`${colors.cyan}└─ ${colors.green}✓ success${colors.reset}`);
-        } else {
-          console.log(`${colors.cyan}└─ ${colors.red}✗ failed (exit ${result.code})${colors.reset}`);
-        }
+      if (result.success) {
+        console.log(`${colors.cyan}└─ ${colors.green}✓ success${colors.reset}`);
+      } else {
+        console.log(`${colors.cyan}└─ ${colors.red}✗ failed (exit ${result.code})${colors.reset}`);
       }
       console.log();
     }
   }
 
+  closeShell();
   printConditionSummary(conditionResults);
   console.log(`${colors.green}Done!${colors.reset}`);
 }
@@ -366,11 +444,15 @@ ${colors.yellow}Examples:${colors.reset}
 ${colors.yellow}How it works:${colors.reset}
   Only runs code blocks under a "Testing", "Tests", or "Test" header.
   The section ends when another header of equal or higher level appears.
+  All blocks run in a single shell session — environment variables,
+  working directory changes, and other state persist across blocks.
 
 ${colors.yellow}Supported languages:${colors.reset}
-  bash, sh, shell               Executed with bash -c
-  javascript, js, node          Executed with node -e
-  python, py, python3           Executed with python3 -c
+  bash, sh, shell, zsh          Executed in a persistent bash shell
+
+${colors.yellow}Export-only blocks:${colors.reset}
+  Blocks containing only export statements run automatically without
+  prompting (e.g., setup blocks that set BASE_URL).
 
 Requires GitHub CLI (gh): https://cli.github.com
 `);
