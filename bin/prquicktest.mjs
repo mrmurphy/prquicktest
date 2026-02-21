@@ -243,8 +243,13 @@ function runInShell(shell, code) {
         const line = stdoutBuf.slice(0, newlineIdx);
         stdoutBuf = stdoutBuf.slice(newlineIdx + 1);
 
-        if (line.startsWith(markerPrefix)) {
-          const exitCode = parseInt(line.slice(markerPrefix.length), 10);
+        const markerIdx = line.indexOf(markerPrefix);
+        if (markerIdx !== -1) {
+          // Output any content before the marker (e.g., if previous command didn't end with newline)
+          if (markerIdx > 0) {
+            process.stdout.write(line.slice(0, markerIdx) + '\n');
+          }
+          const exitCode = parseInt(line.slice(markerIdx + markerPrefix.length), 10);
           cleanup();
           resolve({ success: exitCode === 0, code: exitCode });
           return;
