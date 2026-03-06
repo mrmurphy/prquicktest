@@ -63,7 +63,7 @@ function isTestingHeader(line) {
   const level = match[1].length;
   const title = match[2].trim().toLowerCase();
 
-  if (title === 'testing' || title === 'tests' || title === 'test') {
+  if (/^test(?:ing|s)?(?:\s+\w+)?$/.test(title)) {
     return { level, title: match[2].trim() };
   }
   return null;
@@ -91,7 +91,7 @@ function parseCondition(line) {
 
 function parseMarkdown(content) {
   const blocks = [];
-  const lines = content.split('\n');
+  const lines = content.replace(/\r\n?/g, '\n').split('\n');
   let i = 0;
   let inTestingSection = false;
   let testingSectionLevel = null;
@@ -316,8 +316,8 @@ async function run(content, skipConfirm = false) {
   const blocks = parseMarkdown(content);
 
   if (blocks.length === 0) {
-    console.log(`${colors.yellow}No "Testing" or "Tests" section found in the document.${colors.reset}`);
-    console.log(`${colors.dim}Add a section like "## Testing" with code blocks to run.${colors.reset}`);
+    console.log(`${colors.yellow}No testing section found in the document.${colors.reset}`);
+    console.log(`${colors.dim}Add a section like "## Testing" or "## Test Plan" with code blocks to run.${colors.reset}`);
     return;
   }
 
@@ -447,7 +447,7 @@ ${colors.yellow}Examples:${colors.reset}
   prquicktest -y https://github.com/owner/repo/pull/123
 
 ${colors.yellow}How it works:${colors.reset}
-  Only runs code blocks under a "Testing", "Tests", or "Test" header.
+  Runs code blocks under headers like "Testing", "Tests", "Test Plan", etc.
   The section ends when another header of equal or higher level appears.
   All blocks run in a single shell session — environment variables,
   working directory changes, and other state persist across blocks.

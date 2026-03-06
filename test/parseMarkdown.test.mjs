@@ -11,7 +11,7 @@ function isTestingHeader(line) {
   const level = match[1].length;
   const title = match[2].trim().toLowerCase();
 
-  if (title === 'testing' || title === 'tests' || title === 'test') {
+  if (/^test(?:ing|s)?(?:\s+\w+)?$/.test(title)) {
     return { level, title: match[2].trim() };
   }
   return null;
@@ -32,7 +32,7 @@ function parseCondition(line) {
 
 function parseMarkdown(content) {
   const blocks = [];
-  const lines = content.split('\n');
+  const lines = content.replace(/\r\n?/g, '\n').split('\n');
   let i = 0;
   let inTestingSection = false;
   let testingSectionLevel = null;
@@ -344,6 +344,40 @@ Just some instructions, no code.
 ## Other`;
       const blocks = getCodeBlocks(md);
       assert.strictEqual(blocks.length, 0);
+    });
+
+    it('should match "Testing Instructions" header', () => {
+      const md = `## Testing Instructions\n\`\`\`bash\necho "test"\n\`\`\``;
+      const blocks = getCodeBlocks(md);
+      assert.strictEqual(blocks.length, 1);
+    });
+
+    it('should match "Test Plan" header', () => {
+      const md = `## Test Plan\n\`\`\`bash\necho "test"\n\`\`\``;
+      const blocks = getCodeBlocks(md);
+      assert.strictEqual(blocks.length, 1);
+    });
+
+    it('should match "Testing Steps" and "Tests Summary"', () => {
+      for (const header of ['Testing Steps', 'Tests Summary', 'Test Procedure']) {
+        const md = `## ${header}\n\`\`\`bash\necho "test"\n\`\`\``;
+        const blocks = getCodeBlocks(md);
+        assert.strictEqual(blocks.length, 1, `Failed for header: ${header}`);
+      }
+    });
+
+    it('should NOT match headers with more than one extra word', () => {
+      const md = `## Testing All The Things\n\`\`\`bash\necho "test"\n\`\`\``;
+      const blocks = getCodeBlocks(md);
+      assert.strictEqual(blocks.length, 0);
+    });
+
+    it('should handle \\r\\n line endings in code blocks', () => {
+      const md = "## Testing\r\n\`\`\`bash\r\ncurl -s -X POST http://example.com \\\r\n  -H \"Authorization: token\"\r\n\`\`\`\r\n";
+      const blocks = getCodeBlocks(md);
+      assert.strictEqual(blocks.length, 1);
+      assert.ok(!blocks[0].content.includes('\r'), 'should not contain \\r');
+      assert.ok(blocks[0].content.includes('\\\n'), 'should preserve line continuation');
     });
 
     it('should be case-insensitive for section headers', () => {
